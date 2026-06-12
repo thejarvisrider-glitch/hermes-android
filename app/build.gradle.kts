@@ -11,8 +11,8 @@ android {
         applicationId = "com.hermes.android"
         minSdk = 24
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "1.2"
     }
 
     buildTypes {
@@ -40,10 +40,5 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.11.0")
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
-    implementation("androidx.webkit:webkit:1.9.0")
-    // HTTP client for gateway health checks
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    // Coroutines for async connection monitoring
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
 }

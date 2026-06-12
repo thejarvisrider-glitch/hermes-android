@@ -3,53 +3,57 @@ package com.hermes.android
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.SharedPreferences
+import android.graphics.Color
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.LayoutInflater
+import android.view.View
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.widget.Toast
+import android.widget.*
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import androidx.lifecycle.lifecycleScope
-import kotlinx.coroutines.*
+import androidx.core.content.ContextCompat
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.util.concurrent.TimeUnit
 
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var webView: WebView
     private lateinit var prefs: SharedPreferences
+    private lateinit var webView: WebView
+    private lateinit var statusIndicator: View
+    private lateinit var statusText: TextView
     private val handler = Handler(Looper.getMainLooper())
     private var isOnline = false
+    private var gatewayUrl: String = ""
+    private val localUrl = "http://127.0.0.1:18789"
+    private var autoRetry = true
+
     private val client = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
-        .readTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    // Default laptop gateway URL — user can change in settings
-    private val gatewayUrl: String
-        get() = prefs.getString("gateway_url", "http://192.168.1.100:18789") ?: "http://192.168.1.100:18789"
-
-    private val localUrl = "http://127.0.0.1:18789"
-
-    @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
 
         prefs = getSharedPreferences("hermes_prefs", Context.MODE_PRIVATE)
+        gatewayUrl = prefs.getString("gateway_url", "http://192.168.1.100:18789") ?: "http://192.168.1.100:18789"
+        autoRetry = prefs.getBoolean("auto_retry", true)
 
-        webView = WebView(this)
-        setContentView(webView)
+        webView = findViewById(R.id.webView)
+        statusIndicator = findViewById(R.id.statusIndicator)
+        statusText = findViewById(R.id.statusText)
 
         setupWebView()
+        setupStatusBarClick()
         checkConnectionAndLoad()
-
-        // Periodic connection check every 30 seconds
         startConnectionMonitor()
     }
 
@@ -68,144 +72,171 @@ class MainActivity : AppCompatActivity() {
             loadWithOverviewMode = true
             useWideViewPort = true
         }
-
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = false
         }
         webView.webChromeClient = WebChromeClient()
     }
 
-    /**
-     * Check if laptop gateway is reachable.
-     * If YES → load laptop gateway (full power).
-     * If NO  → load local Termux Hermes gateway (offline mode).
-     */
+    private fun setupStatusBarClick() {
+        statusIndicator.setOnClickListener { showSettingsDialog() }
+        statusText.setOnClickListener { showSettingsDialog() }
+    }
+
+    private fun showSettingsDialog() {
+        val dialogView = LayoutInflater.from(this).inflate(R.layout.dialog_settings, null)
+        val etIp = dialogView.findViewById<EditText>(R.id.etGatewayIp)
+        val etPort = dialogView.findViewById<EditText>(R.id.etGatewayPort)
+        val switchAutoRetry = dialogView.findViewById<Switch>(R.id.switchAutoRetry)
+
+        val parts = gatewayUrl.removePrefix("http://").split(":")
+        etIp.setText(parts[0])
+        etPort.setText(parts.getOrElse(1) { "18789" })
+        switchAutoRetry.isChecked = autoRetry
+
+        AlertDialog.Builder(this)
+            .setTitle("⚙️ Gateway Settings")
+            .setView(dialogView)
+            .setPositiveButton("Save & Connect") { _, _ ->
+                val ip = etIp.text.toString().trim()
+                val port = etPort.text.toString().trim()
+                if (ip.isNotEmpty() && port.isNotEmpty()) {
+                    gatewayUrl = "http://$ip:$port"
+                    autoRetry = switchAutoRetry.isChecked
+                    prefs.edit()
+                        .putString("gateway_url", gatewayUrl)
+                        .putBoolean("auto_retry", autoRetry)
+                        .apply()
+                    checkConnectionAndLoad()
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .setNeutralButton("Test") { _, _ ->
+                val ip = etIp.text.toString().trim()
+                val port = etPort.text.toString().trim()
+                if (ip.isNotEmpty() && port.isNotEmpty()) {
+                    testConnection("http://$ip:$port")
+                }
+            }
+            .show()
+    }
+
+    private fun testConnection(url: String) {
+        Toast.makeText(this, "Testing $url...", Toast.LENGTH_SHORT).show()
+        Thread {
+            val reachable = pingGateway(url)
+            handler.post {
+                if (reachable) {
+                    Toast.makeText(this, "✅ Connection successful!", Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(this, "❌ Cannot reach gateway", Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
+    }
+
     private fun checkConnectionAndLoad() {
-        lifecycleScope.launch(Dispatchers.IO) {
+        updateStatus("checking", "⏳ Checking connection...")
+        Thread {
             val laptopReachable = pingGateway(gatewayUrl)
             val localReachable = pingGateway(localUrl)
 
-            withContext(Dispatchers.Main) {
+            handler.post {
                 when {
                     laptopReachable -> {
                         isOnline = true
-                       (webView.loadUrl(gatewayUrl)
-                        showToast("🟢 Online — Connected to laptop")
+                        updateStatus("online", "🟢 Online — Laptop")
+                        webView.loadUrl(gatewayUrl)
                     }
                     localReachable -> {
                         isOnline = false
+                        updateStatus("offline", "🟡 Offline — Local")
                         webView.loadUrl(localUrl)
-                        showToast("🟡 Offline — Running local Hermes")
                     }
                     else -> {
                         isOnline = false
-                        showOfflineDialog()
+                        updateStatus("error", "🔴 No gateway found")
+                        showOfflineHelp()
                     }
                 }
             }
-        }
+        }.start()
     }
 
     private fun pingGateway(url: String): Boolean {
         return try {
-            val request = Request.Builder()
-                .url("$url/health")
-                .head()
-                .build()
-            val response = client.newCall(request).execute()
-            response.isSuccessful || response.code == 404  // 404 also means server is up
-        } catch (e: Exception) {
-            // Try root URL as fallback
-            try {
-                val request2 = Request.Builder().url(url).head().build()
-                client.newCall(request2).execute().use { it.code < 500 }
-            } catch (e2: Exception) {
-                false
-            }
+            val request = Request.Builder().url(url).head().build()
+            client.newCall(request).execute().use { it.code < 500 }
+        } catch (e: Exception) { false }
+    }
+
+    private fun updateStatus(state: String, message: String) {
+        statusText.text = message
+        val color = when (state) {
+            "online" -> Color.parseColor("#4CAF50")      // Green
+            "offline" -> Color.parseColor("#FF9800")      // Orange
+            "checking" -> Color.parseColor("#2196F3")     // Blue
+            else -> Color.parseColor("#F44336")           // Red
         }
+        statusIndicator.setBackgroundColor(color)
     }
 
     private fun startConnectionMonitor() {
         handler.postDelayed(object : Runnable {
             override fun run() {
-                if (isOnline) {
-                    // Check if laptop is still reachable
-                    lifecycleScope.launch(Dispatchers.IO) {
-                        val stillOnline = pingGateway(gatewayUrl)
-                        if (!stillOnline) {
-                            withContext(Dispatchers.Main) {
-                                showToast("🔴 Laptop disconnected — Switching to offline mode")
-                                checkConnectionAndLoad()  // Will fall back to local
+                if (autoRetry) {
+                    if (isOnline) {
+                        Thread {
+                            if (!pingGateway(gatewayUrl)) {
+                                handler.post { updateStatus("error", "🔴 Laptop disconnected") }
                             }
-                        }
-                    }
-                } else {
-                    // Check if laptop came back online
-                    lifecycleScope.launch(Dispatchers.IO) {
-                        val laptopBack = pingGateway(gatewayUrl)
-                        if (laptopBack) {
-                            withContext(Dispatchers.Main) {
-                                showToast("🟢 Laptop back online — Switching to full mode")
-                                isOnline = true
-                                webView.loadUrl(gatewayUrl)
+                        }.start()
+                    } else {
+                        Thread {
+                            if (pingGateway(gatewayUrl)) {
+                                handler.post {
+                                    isOnline = true
+                                    updateStatus("online", "🟢 Laptop back online!")
+                                    webView.loadUrl(gatewayUrl)
+                                }
                             }
-                        }
+                        }.start()
                     }
                 }
-                handler.postDelayed(this, 30000)  // Check every 30 seconds
+                handler.postDelayed(this, 30000)
             }
         }, 30000)
     }
 
-    private fun showOfflineDialog() {
+    private fun showOfflineHelp() {
         AlertDialog.Builder(this)
-            .setTitle("No Hermes Gateway Found")
+            .setTitle("🔴 No Gateway Found")
             .setMessage(
-                "Neither laptop nor local Hermes is reachable.\n\n" +
-                "Options:\n" +
-                "1. Check your laptop is on and Hermes is running\n" +
-                "2. Connect to the same WiFi network\n" +
-                "3. Set up Termux Hermes for offline mode\n\n" +
-                "Gateway URL: $gatewayUrl"
+                "Cannot connect to Hermes gateway at:\n$gatewayUrl\n\n" +
+                "Make sure:\n" +
+                "1. Your laptop is turned on\n" +
+                "2. Hermes desktop app is running\n" +
+                "3. Both devices are on the same WiFi\n\n" +
+                "Your laptop IP might be different. Common IPs:\n" +
+                "• 192.168.1.x\n" +
+                "• 192.168.0.x\n" +
+                "• 10.0.0.x"
             )
             .setPositiveButton("Retry") { _, _ -> checkConnectionAndLoad() }
-            .setNegativeButton("Settings") { _, _ -> showSettings() }
+            .setNegativeButton("Settings") { _, _ -> showSettingsDialog() }
             .setNeutralButton("Force Local") { _, _ ->
                 webView.loadUrl(localUrl)
+                updateStatus("offline", "🟡 Forced local mode")
             }
             .show()
-    }
-
-    private fun showSettings() {
-        val urls = arrayOf(
-            gatewayUrl,
-            "http://192.168.1.100:18789",
-            "http://192.168.0.100:18789",
-            "http://10.0.2.2:18789",
-            "http://127.0.0.1:18789"
-        )
-        AlertDialog.Builder(this)
-            .setTitle("Select Gateway URL")
-            .setItems(urls) { _, which ->
-                val selected = urls[which]
-                prefs.edit().putString("gateway_url", selected).apply()
-                checkConnectionAndLoad()
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun showToast(msg: String) {
-        Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
     }
 
     override fun onBackPressed() {
-        if (::webView.isInitialized && webView.canGoBack()) {
+        if (webView.canGoBack()) {
             webView.goBack()
         } else {
             AlertDialog.Builder(this)
                 .setTitle("Exit Hermes?")
-                .setMessage("Close the app? Hermes will stop responding.")
                 .setPositiveButton("Exit") { _, _ -> finish() }
                 .setNegativeButton("Stay", null)
                 .show()
