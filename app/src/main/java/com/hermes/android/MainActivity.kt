@@ -68,7 +68,7 @@ class MainActivity : AppCompatActivity() {
     private fun buildUI() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; setBackgroundColor(C_BG)
-            layoutParams = ViewGroup.LayoutParams(MATCH, MATCH)
+            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         }
 
         // Status bar
@@ -82,12 +82,12 @@ class MainActivity : AppCompatActivity() {
         }
         statusText = TextView(this).apply {
             text = "Connecting…"; textSize = 13f; setTextColor(C_TEXT_SEC)
-            layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f).apply { setMargins(dp(10), 0, 0, 0) }
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(dp(10), 0, 0, 0) }
         }
         syncBadge = TextView(this).apply {
             text = ""; textSize = 10f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
             setPadding(dp(6), dp(2), dp(6), dp(2)); background = rounded(C_GREEN, dp(10))
-            visibility = View.GONE; layoutParams = LinearLayout.LayoutParams(WRAP, dp(20)).apply { setMargins(0, 0, dp(8), 0) }
+            visibility = View.GONE; layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(20)).apply { setMargins(0, 0, dp(8), 0) }
         }
         btnSettings = ImageButton(this).apply {
             setImageResource(android.R.drawable.ic_menu_preferences)
@@ -104,12 +104,12 @@ class MainActivity : AppCompatActivity() {
             text = "⚠ Offline — Messages will send when connected"
             textSize = 12f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
             setPadding(0, dp(8), 0, dp(8)); setBackgroundColor(C_ORANGE); visibility = View.GONE
-            layoutParams = LinearLayout.LayoutParams(MATCH, WRAP)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         }
 
         // Chat list
         recycler = RecyclerView(this).apply {
-            layoutParams = LinearLayout.LayoutParams(MATCH, 0, 1f)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
             layoutManager = LinearLayoutManager(this@MainActivity).apply { stackFromEnd = true }
             setBackgroundColor(C_BG); setPadding(0, dp(8), 0, dp(8)); clipToPadding = false
         }
@@ -120,7 +120,7 @@ class MainActivity : AppCompatActivity() {
         typingIndicator = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(16), dp(4), dp(16), dp(4)); setBackgroundColor(C_BG); visibility = View.GONE
-            layoutParams = LinearLayout.LayoutParams(MATCH, WRAP)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         }
         for (i in 0..2) {
             val dot = View(this).apply {
@@ -139,7 +139,7 @@ class MainActivity : AppCompatActivity() {
             hint = "Message Hermes…"; setHintTextColor(C_HINT); setTextColor(C_TEXT)
             textSize = 16f; setPadding(dp(16), dp(12), dp(16), dp(12))
             background = rounded(C_INPUT, dp(24))
-            layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f).apply { setMargins(0, 0, dp(8), 0) }
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, dp(8), 0) }
             imeOptions = EditorInfo.IME_ACTION_SEND
             setOnEditorActionListener { _, id, _ -> if (id == EditorInfo.IME_ACTION_SEND) { send(); true } else false }
         }
@@ -317,17 +317,19 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
-    private val Int.dp: Int get() = dp(this)
     private fun circle(color: Int) = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(color) }
     private fun rounded(color: Int, r: Int) = GradientDrawable().apply { shape = GradientDrawable.RECTANGLE; setColor(color); cornerRadius = r.toFloat() }
-    private fun pulse(v: View) { ValueAnimator.ofFloat(1f, 1.2f, 1f).apply { duration = 500; addUpdateListener { v.scaleX = it.animatedValue as Float; v.scaleY = it.animatedValue as Float }; start() }
+    private fun pulse(v: View) {
+        ValueAnimator.ofFloat(1f, 1.2f, 1f).apply {
+            duration = 500
+            addUpdateListener { v.scaleX = it.animatedValue as Float; v.scaleY = it.animatedValue as Float }
+        }.start()
+    }
 
     override fun onBackPressed() { moveTaskToBack(true) }
     override fun onDestroy() { webSocket?.close(1000, "exit"); handler.removeCallbacksAndMessages(null); super.onDestroy() }
 
     companion object {
-        val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
-        val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
         const val C_BG = 0xFF0D1117.toInt()
         const val C_SURFACE = 0xFF161B22.toInt()
         const val C_SURFACE_CARD = 0xFF21262D.toInt()
