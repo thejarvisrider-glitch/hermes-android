@@ -1,459 +1,252 @@
 package com.hermes.android
 
-import android.content.Context
-import android.content.SharedPreferences
 import android.graphics.Color
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.view.LayoutInflater
-import android.view.View
+import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.*
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import okhttp3.*
-import org.json.JSONArray
 import org.json.JSONObject
-import java.io.File
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
-/**
- * Hermes Android v4.0 — Native Chat UI
- * 
- * Features:
- * - Native chat UI (message bubbles)
- * - WebSocket connection to Hermes gateway (JSON-RPC)
- * - Online mode: connect to PC gateway
- * - Offline mode: local storage + sync when back online
- * - Workspace sync via Syncthing API
- * - Settings: gateway URL, sync config
- */
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var prefs: SharedPreferences
-    private lateinit var chatAdapter: ChatAdapter
-    private lateinit var recyclerView: RecyclerView
-    private lateinit var inputField: EditText
-    private lateinit var sendButton: ImageButton
-    private lateinit var statusDot: View
-    private lateinit var statusLabel: TextView
-    private lateinit var syncLabel: TextView
-    private lateinit var btnSettings: ImageButton
-    private val handler = Handler(Looper.getMainLooper())
-    
+    private lateinit var prefs: android.content.SharedPreferences
+    private var gatewayUrl = ""
+    private var wsUrl = ""
     private var webSocket: WebSocket? = null
-    private var gatewayUrl: String = ""
-    private var wsUrl: String = ""
-    private var sessionId: String = UUID.randomUUID().toString()
     private var isConnected = false
-    private var isOnline = false
-    private val messages = mutableListOf<ChatMessage>()
-    private val pendingMessages = mutableListOf<String>() // Queue for offline
-    
+    private val handler = Handler(Looper.getMainLooper())
+    private val messages = mutableListOf<Msg>()
+    private lateinit var adapter: MsgAdapter
+    private lateinit var recycler: RecyclerView
+    private lateinit var input: EditText
+    private lateinit var statusDot: View
+    private lateinit var statusText: TextView
+
+    data class Msg(val role: String, val content: String)
+
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(0, TimeUnit.SECONDS) // No timeout for WebSocket
+        .readTimeout(0, TimeUnit.SECONDS)
         .build()
-
-    data class ChatMessage(
-        val id: String = UUID.randomUUID().toString(),
-        val role: String = "user", // "user" or "assistant"
-        val content: String = "",
-        val timestamp: Long = System.currentTimeMillis(),
-        val isPending: Boolean = false
-    )
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
-        prefs = getSharedPreferences("hermes_prefs", Context.MODE_PRIVATE)
-        gatewayUrl = prefs.getString("gateway_url", "http://192.168.1.5:18789") ?: "http://192.168.1.5:18789"
-        wsUrl = gatewayUrl.replace("http://", "ws://").replace("https://", "wss://") + "/api/ws"
-        
-        setupUI()
-        connectWebSocket()
-        startConnectionMonitor()
-    }
 
-    private fun setupUI() {
+        prefs = getSharedPreferences("hermes_prefs", MODE_PRIVATE)
+        gatewayUrl = prefs.getString("gateway_url", "http://192.168.1.5:18789") ?: "http://192.168.1.5:18789"
+        wsUrl = gatewayUrl.replace("http://", "ws://") + "/api/ws"
+
+        // Build UI
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.parseColor("#0a0a0a"))
             layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         }
 
-        // ── Status Bar ──
-        val statusBar = LinearLayout(this).apply {
+        // Status bar
+        val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = android.view.Gravity.CENTER_VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(16), dp(10), dp(16), dp(10))
             setBackgroundColor(Color.parseColor("#1a1a1a"))
         }
-        
         statusDot = View(this).apply {
-            layoutParams = LinearLayout.LayoutParams(dp(10), dp(10)).apply { 
-                setMargins(0, 0, dp(8), 0)
-            }
-            background = getOvalDrawable(Color.parseColor("#FF9800"))
+            layoutParams = LinearLayout.LayoutParams(dp(10), dp(10)).apply { setMargins(0, 0, dp(8), 0) }
+            setBackgroundColor(Color.parseColor("#FF9800"))
         }
-        
-        statusLabel = TextView(this).apply {
+        statusText = TextView(this).apply {
             text = "Connecting..."
             textSize = 13f
-            setTextColor(Color.parseColor("#aaaaaa"))
+            setTextColor(Color.parseColor("#aaa"))
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
-
-        btnSettings = ImageButton(this).apply {
+        val btnSet = ImageButton(this).apply {
             setImageResource(android.R.drawable.ic_menu_preferences)
             setBackgroundColor(Color.TRANSPARENT)
-            setColorFilter(Color.parseColor("#666666"))
-            setPadding(dp(8), dp(8), dp(8), dp(8))
             setOnClickListener { showSettings() }
             layoutParams = LinearLayout.LayoutParams(dp(36), dp(36))
         }
+        bar.addView(statusDot)
+        bar.addView(statusText)
+        bar.addView(btnSet)
 
-        syncLabel = TextView(this).apply {
-            text = ""
-            textSize = 11f
-            setTextColor(Color.parseColor("#555555"))
-        }
-
-        statusBar.addView(statusDot)
-        statusBar.addView(statusLabel)
-        statusBar.addView(btnSettings)
-
-        // ── Chat List ──
-        recyclerView = RecyclerView(this).apply {
+        // Chat list
+        recycler = RecyclerView(this).apply {
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
-            layoutManager = LinearLayoutManager(this@MainActivity).apply {
-                stackFromEnd = true
-            }
+            layoutManager = LinearLayoutManager(this@MainActivity).apply { stackFromEnd = true }
         }
-        chatAdapter = ChatAdapter(messages)
-        recyclerView.adapter = chatAdapter
+        adapter = MsgAdapter(messages)
+        recycler.adapter = adapter
 
-        // ── Input Bar ──
-        val inputBar = LinearLayout(this).apply {
+        // Input
+        val inpBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = android.view.Gravity.CENTER_VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(12), dp(8), dp(12), dp(12))
             setBackgroundColor(Color.parseColor("#1a1a1a"))
         }
-
-        inputField = EditText(this).apply {
+        input = EditText(this).apply {
             hint = "Type a message..."
-            setHintTextColor(Color.parseColor("#555555"))
-            setTextColor(Color.parseColor("#ffffff"))
+            setHintTextColor(Color.parseColor("#555"))
+            setTextColor(Color.WHITE)
             textSize = 16f
-            setPadding(dp(16), dp(12), dp(16), dp(12))
-            background = getRoundedDrawable(Color.parseColor("#2a2a2a"), dp(24))
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                setMargins(0, 0, dp(8), 0)
-            }
-            setOnEditorActionListener { _, actionId, _ ->
-                if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEND) {
-                    sendMessage(); true
-                } else false
-            }
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, dp(8), 0) }
         }
-
-        sendButton = ImageButton(this).apply {
+        val sendBtn = ImageButton(this).apply {
             setImageResource(android.R.drawable.ic_menu_send)
             setBackgroundColor(Color.parseColor("#1A73E8"))
-            background = getRoundedDrawable(Color.parseColor("#1A73E8"), dp(28))
-            setColorFilter(Color.WHITE)
-            setPadding(dp(14), dp(14), dp(14), dp(14))
-            setOnClickListener { sendMessage() }
+            setOnClickListener { sendMsg() }
             layoutParams = LinearLayout.LayoutParams(dp(48), dp(48))
         }
+        inpBar.addView(input)
+        inpBar.addView(sendBtn)
 
-        inputBar.addView(inputField)
-        inputBar.addView(sendButton)
-
-        // Assemble
-        root.addView(statusBar)
-        root.addView(recyclerView)
-        root.addView(inputBar)
-        
+        root.addView(bar)
+        root.addView(recycler)
+        root.addView(inpBar)
         setContentView(root)
-        
-        // Add welcome message
-        addMessage(ChatMessage(role = "assistant", content = "Welcome to Hermes! Type a message to start chatting."))
+
+        addMsg("assistant", "Welcome to Hermes! Connect to your PC gateway to start chatting.")
+        connectWs()
+        startMonitor()
     }
 
-    // ── WebSocket Connection ──
-
-    private fun connectWebSocket() {
+    private fun connectWs() {
         updateStatus("connecting", "⏳ Connecting...")
-        
-        val request = Request.Builder().url(wsUrl).build()
-        webSocket = client.newWebSocket(request, object : WebSocketListener() {
-            override fun onOpen(ws: WebSocket, response: Response) {
+        val req = Request.Builder().url(wsUrl).build()
+        webSocket = client.newWebSocket(req, object : WebSocketListener() {
+            override fun onOpen(ws: WebSocket, resp: Response) {
                 isConnected = true
-                isOnline = true
+                handler.post { updateStatus("online", "🟢 Connected") }
+            }
+            override fun onMessage(ws: WebSocket, text: String) {
                 handler.post {
-                    updateStatus("online", "🟢 Connected")
-                    // Send pending messages
-                    for (msg in pendingMessages) {
-                        sendRpcMessage(msg)
+                    try {
+                        val obj = JSONObject(text)
+                        if (obj.has("result")) {
+                            val content = obj.optJSONObject("result")?.optString("content", "") ?: text
+                            addMsg("assistant", content)
+                        }
+                    } catch (e: Exception) {
+                        addMsg("assistant", text)
                     }
-                    pendingMessages.clear()
                 }
             }
-
-            override fun onMessage(ws: WebSocket, text: String) {
-                handler.post { handleRpcMessage(text) }
-            }
-
             override fun onClosing(ws: WebSocket, code: Int, reason: String) {
                 ws.close(1000, null)
                 isConnected = false
                 handler.post { updateStatus("offline", "🔴 Disconnected") }
             }
-
-            override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
+            override fun onFailure(ws: WebSocket, t: Throwable, resp: Response?) {
                 isConnected = false
-                isOnline = false
-                handler.post { 
-                    updateStatus("offline", "🔴 Connection failed")
-                    // Try HTTP fallback
-                    tryHttpMode()
-                }
+                handler.post { updateStatus("offline", "🔴 Failed — tap Settings") }
             }
         })
     }
 
-    private fun handleRpcMessage(json: String) {
-        try {
-            val obj = JSONObject(json)
-            
-            // Handle JSON-RPC response
-            if (obj.has("result")) {
-                val result = obj.getJSONObject("result")
-                if (result.has("content")) {
-                    val content = result.getString("content")
-                    addMessage(ChatMessage(role = "assistant", content = content))
-                }
-            }
-            
-            // Handle events
-            if (obj.has("method")) {
-                val method = obj.getString("method")
-                when (method) {
-                    "gateway.ready" -> updateStatus("online", "🟢 Online")
-                    "agent.start" -> { /* Agent started thinking */ }
-                    "agent.token" -> {
-                        val token = obj.optJSONObject("params")?.optString("token", "") ?: ""
-                        appendToLastMessage(token)
-                    }
-                    "agent.done" -> {
-                        // Response complete
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            // Not JSON-RPC, treat as plain text
-            addMessage(ChatMessage(role = "assistant", content = json))
-        }
-    }
-
-    private fun sendRpcMessage(text: String) {
-        // Hermes uses newline-delimited JSON-RPC over WebSocket
-        val rpc = JSONObject().apply {
-            put("jsonrpc", "2.0")
-            put("id", UUID.randomUUID().toString())
-            put("method", "chat.send")
-            put("params", JSONObject().apply {
-                put("message", text)
-                put("session_id", sessionId)
-            })
-        }.toString()
-        
-        webSocket?.send(rpc)
-    }
-
-    private fun tryHttpMode() {
-        // Fallback: use HTTP API if WebSocket fails
-        Thread {
-            try {
-                val req = Request.Builder().url("$gatewayUrl/health").build()
-                client.newCall(req).execute().use { resp ->
-                    if (resp.isSuccessful) {
-                        handler.post { updateStatus("online", "🟢 HTTP Mode") }
-                        isOnline = true
-                        isConnected = true
-                    }
-                }
-            } catch (e: Exception) {
-                handler.post { updateStatus("offline", "🔴 No gateway") }
-            }
-        }.start()
-    }
-
-    // ── Messaging ──
-
-    private fun sendMessage() {
-        val text = inputField.text.toString().trim()
+    private fun sendMsg() {
+        val text = input.text.toString().trim()
         if (text.isEmpty()) return
-        
-        inputField.setText("")
-        addMessage(ChatMessage(role = "user", content = text))
-        
+        input.setText("")
+        addMsg("user", text)
         if (isConnected) {
-            sendRpcMessage(text)
+            val rpc = JSONObject().apply {
+                put("jsonrpc", "2.0")
+                put("id", UUID.randomUUID().toString())
+                put("method", "chat.send")
+                put("params", JSONObject().apply { put("message", text) })
+            }.toString()
+            webSocket?.send(rpc)
         } else {
-            // Queue for later
-            pendingMessages.add(text)
-            addMessage(ChatMessage(role = "assistant", content = "⏸ Queued — will send when connected"))
-            // Try reconnect
-            connectWebSocket()
+            addMsg("assistant", "⏸ Not connected — check gateway settings")
+            connectWs()
         }
     }
 
-    private fun addMessage(msg: ChatMessage) {
-        messages.add(msg)
+    private fun addMsg(role: String, content: String) {
+        messages.add(Msg(role, content))
         handler.post {
-            chatAdapter.notifyItemInserted(messages.size - 1)
-            recyclerView.scrollToPosition(messages.size - 1)
+            adapter.notifyItemInserted(messages.size - 1)
+            recycler.scrollToPosition(messages.size - 1)
         }
     }
 
-    private fun appendToLastMessage(token: String) {
-        if (messages.isNotEmpty()) {
-            val last = messages.last()
-            if (last.role == "assistant" && !last.isPending) {
-                messages[messages.size - 1] = last.copy(content = last.content + token)
-                handler.post {
-                    chatAdapter.notifyItemChanged(messages.size - 1)
-                    recyclerView.scrollToPosition(messages.size - 1)
-                }
-            }
-        } else {
-            addMessage(ChatMessage(role = "assistant", content = token, isPending = true))
+    private fun updateStatus(state: String, text: String) {
+        statusText.text = text
+        val c = when (state) {
+            "online" -> Color.parseColor("#4CAF50")
+            "offline" -> Color.parseColor("#F44336")
+            else -> Color.parseColor("#FF9800")
         }
+        statusDot.setBackgroundColor(c)
     }
 
-    // ── Connection Monitor ──
-
-    private fun startConnectionMonitor() {
+    private fun startMonitor() {
         handler.postDelayed(object : Runnable {
             override fun run() {
-                if (!isConnected) {
-                    connectWebSocket()
-                }
+                if (!isConnected) connectWs()
                 handler.postDelayed(this, 15000)
             }
         }, 15000)
     }
 
-    // ── Status ──
-
-    private fun updateStatus(state: String, text: String) {
-        statusLabel.text = text
-        val color = when (state) {
-            "online" -> Color.parseColor("#4CAF50")
-            "offline" -> Color.parseColor("#F44336")
-            else -> Color.parseColor("#FF9800")
-        }
-        statusDot.background = getOvalDrawable(color)
-    }
-
-    // ── Settings ──
-
     private fun showSettings() {
-        val view = LayoutInflater.from(this).inflate(R.layout.dialog_settings, null)
+        val view = layoutInflater.inflate(R.layout.dialog_settings, null)
         val etIp = view.findViewById<EditText>(R.id.etGatewayIp)
         val etPort = view.findViewById<EditText>(R.id.etGatewayPort)
-        val swAuto = view.findViewById<Switch>(R.id.switchAutoRetry)
-
-        val parts = gatewayUrl.replace("http://", "").replace("https://", "").split(":")
+        val parts = gatewayUrl.replace("http://", "").split(":")
         etIp.setText(parts[0])
         etPort.setText(parts.getOrElse(1) { "18789" })
-        swAuto.isChecked = prefs.getBoolean("auto_retry", true)
-
         AlertDialog.Builder(this)
-            .setTitle("⚙️ Settings")
+            .setTitle("Settings")
             .setView(view)
             .setPositiveButton("Save") { _, _ ->
                 gatewayUrl = "http://${etIp.text}:${etPort.text}"
                 wsUrl = "ws://${etIp.text}:${etPort.text}/api/ws"
-                prefs.edit()
-                    .putString("gateway_url", gatewayUrl)
-                    .putBoolean("auto_retry", swAuto.isChecked)
-                    .apply()
-                // Reconnect
-                webSocket?.close(1000, "Reconnecting")
-                connectWebSocket()
+                prefs.edit().putString("gateway_url", gatewayUrl).apply()
+                webSocket?.close(1000, "reconnect")
+                connectWs()
             }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
-    // ── Helpers ──
+    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
-    private fun dp(px: Int): Int = (px * resources.displayMetrics.density).toInt()
-
-    private fun getOvalDrawable(color: Int): android.graphics.drawable.Drawable {
-        val shape = android.graphics.drawable.GradientDrawable().apply {
-            shape = android.graphics.drawable.GradientDrawable.OVAL
-            setColor(color)
+    inner class MsgAdapter(private val items: List<Msg>) : RecyclerView.Adapter<MsgAdapter.VH>() {
+        inner class VH(v: View) : RecyclerView.ViewHolder(v) { val bubble: TextView = v.findViewById(R.id.bubble) }
+        override fun onCreateViewHolder(p: ViewGroup, t: Int): VH {
+            val v = layoutInflater.inflate(R.layout.item_chat, p, false); return VH(v)
         }
-        return shape
-    }
-
-    private fun getRoundedDrawable(color: Int, radius: Int): android.graphics.drawable.Drawable {
-        val shape = android.graphics.drawable.GradientDrawable().apply {
-            shape = android.graphics.drawable.GradientDrawable.RECTANGLE
-            setColor(color)
-            cornerRadius = radius.toFloat()
-        }
-        return shape
-    }
-
-    // ── Chat Adapter (Native Message Bubbles) ──
-
-    inner class ChatAdapter(private val items: List<ChatMessage>) : 
-        RecyclerView.Adapter<ChatAdapter.VH>() {
-
-        inner class VH(view: View) : RecyclerView.ViewHolder(view) {
-            val bubble: TextView = view.findViewById(R.id.bubble)
-        }
-
-        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
-            val view = LayoutInflater.from(parent.context).inflate(R.layout.item_chat, parent, false)
-            return VH(view)
-        }
-
-        override fun onBindViewHolder(holder: VH, position: Int) {
-            val msg = items[position]
-            holder.bubble.text = msg.content
-            
-            // Style based on role
-            val layoutParams = holder.bubble.layoutParams as FrameLayout.LayoutParams
-            if (msg.role == "user") {
-                holder.bubble.background = getRoundedDrawable(Color.parseColor("#1A73E8"), dp(18))
-                holder.bubble.setTextColor(Color.WHITE)
-                layoutParams.gravity = android.view.Gravity.END
+        override fun onBindViewHolder(h: VH, i: Int) {
+            val m = items[i]
+            h.bubble.text = m.content
+            val lp = h.bubble.layoutParams as FrameLayout.LayoutParams
+            if (m.role == "user") {
+                h.bubble.setBackgroundColor(Color.parseColor("#1A73E8"))
+                h.bubble.setTextColor(Color.WHITE)
+                lp.gravity = Gravity.END
             } else {
-                holder.bubble.background = getRoundedDrawable(Color.parseColor("#2a2a2a"), dp(18))
-                holder.bubble.setTextColor(Color.parseColor("#e0e0e0"))
-                layoutParams.gravity = android.view.Gravity.START
+                h.bubble.setBackgroundColor(Color.parseColor("#2a2a2a"))
+                h.bubble.setTextColor(Color.parseColor("#e0e0e0"))
+                lp.gravity = Gravity.START
             }
-            holder.bubble.layoutParams = layoutParams
-            holder.bubble.maxWidth = (resources.displayMetrics.widthPixels * 0.75).toInt()
+            h.bubble.layoutParams = lp
         }
-
         override fun getItemCount() = items.size
     }
 
     override fun onDestroy() {
-        webSocket?.close(1000, "App closed")
+        webSocket?.close(1000, "exit")
         handler.removeCallbacksAndMessages(null)
         super.onDestroy()
     }
