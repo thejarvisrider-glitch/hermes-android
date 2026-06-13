@@ -5,48 +5,6 @@
     android:orientation="vertical"
     android:background="#0a0a0a">
 
-    <!-- Status Bar -->
-    <LinearLayout
-        android:id="@+id/statusBar"
-        android:layout_width="match_parent"
-        android:layout_height="40dp"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:paddingStart="16dp"
-        android:paddingEnd="16dp"
-        android:background="#1a1a1a"
-        android:elevation="4dp">
-
-        <View
-            android:id="@+id/statusIndicator"
-            android:layout_width="8dp"
-            android:layout_height="8dp"
-            android:background="#FF9800" />
-
-        <TextView
-            android:id="@+id/statusText"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:layout_marginStart="8dp"
-            android:text="Connecting..."
-            android:textSize="12sp"
-            android:textColor="#aaaaaa" />
-
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="HERMES"
-            android:textSize="10sp"
-            android:textColor="#555555"
-            android:letterSpacing="0.2" />
-    </LinearLayout>
-
-    <!-- WebView — Loads the exact Hermes desktop UI -->
-    <WebView
-        android:id="@+id/webView"
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1" />
+    <!-- Status Bar is created programmatically -->
 
 </LinearLayout>

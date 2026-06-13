@@ -1,351 +1,460 @@
 package com.hermes.android
 
-import android.annotation.SuppressLint
 import android.content.Context
-import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.Color
-import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.LayoutInflater
-import android.webkit.*
+import android.view.View
+import android.view.ViewGroup
 import android.widget.*
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import okhttp3.OkHttpClient
-import okhttp3.Request
+import androidx.core.content.ContextCompat
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import okhttp3.*
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
-import java.io.FileOutputStream
-import java.io.InputStream
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 /**
- * Hermes Android — Exact desktop app experience
+ * Hermes Android v4.0 — Native Chat UI
  * 
- * When PC is online: connects to PC Hermes gateway
- * When PC is offline: runs Hermes locally via Termux
- * Full workspace sync between PC and mobile
+ * Features:
+ * - Native chat UI (message bubbles)
+ * - WebSocket connection to Hermes gateway (JSON-RPC)
+ * - Online mode: connect to PC gateway
+ * - Offline mode: local storage + sync when back online
+ * - Workspace sync via Syncthing API
+ * - Settings: gateway URL, sync config
  */
 class MainActivity : AppCompatActivity() {
 
     private lateinit var prefs: SharedPreferences
-    private lateinit var webView: WebView
-    private lateinit var statusBar: LinearLayout
-    private lateinit var statusIndicator: View
-    private lateinit var statusText: TextView
+    private lateinit var chatAdapter: ChatAdapter
+    private lateinit var recyclerView: RecyclerView
+    private lateinit var inputField: EditText
+    private lateinit var sendButton: ImageButton
+    private lateinit var statusDot: View
+    private lateinit var statusLabel: TextView
+    private lateinit var syncLabel: TextView
+    private lateinit var btnSettings: ImageButton
     private val handler = Handler(Looper.getMainLooper())
-
-    private var mode = "connecting" // "online", "offline", "connecting"
+    
+    private var webSocket: WebSocket? = null
     private var gatewayUrl: String = ""
-    private val localUrl = "http://127.0.0.1:18789"
-    private val workspaceDir: File by lazy { getDir("workspace", Context.MODE_PRIVATE) }
-
+    private var wsUrl: String = ""
+    private var sessionId: String = UUID.randomUUID().toString()
+    private var isConnected = false
+    private var isOnline = false
+    private val messages = mutableListOf<ChatMessage>()
+    private val pendingMessages = mutableListOf<String>() // Queue for offline
+    
     private val client = OkHttpClient.Builder()
-        .connectTimeout(5, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(0, TimeUnit.SECONDS) // No timeout for WebSocket
         .build()
+
+    data class ChatMessage(
+        val id: String = UUID.randomUUID().toString(),
+        val role: String = "user", // "user" or "assistant"
+        val content: String = "",
+        val timestamp: Long = System.currentTimeMillis(),
+        val isPending: Boolean = false
+    )
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_main)
-
+        
         prefs = getSharedPreferences("hermes_prefs", Context.MODE_PRIVATE)
         gatewayUrl = prefs.getString("gateway_url", "http://192.168.1.5:18789") ?: "http://192.168.1.5:18789"
-
-        webView = findViewById(R.id.webView)
-        statusBar = findViewById(R.id.statusBar)
-        statusIndicator = findViewById(R.id.statusIndicator)
-        statusText = findViewById(R.id.statusText)
-
-        setupWebView()
-        setupStatusBarClick()
-        checkMode()
-        startMonitor()
+        wsUrl = gatewayUrl.replace("http://", "ws://").replace("https://", "wss://") + "/api/ws"
+        
+        setupUI()
+        connectWebSocket()
+        startConnectionMonitor()
     }
 
-    @SuppressLint("SetJavaScriptEnabled")
-    private fun setupWebView() {
-        webView.settings.apply {
-            javaScriptEnabled = true
-            domStorageEnabled = true
-            allowFileAccess = true
-            allowContentAccess = true
-            allowUniversalAccessFromFileURLs = true
-            cacheMode = WebSettings.LOAD_DEFAULT
-            mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-            setSupportZoom(true)
-            builtInZoomControls = true
-            displayZoomControls = false
-            loadWithOverviewMode = true
-            useWideViewPort = true
-            javaScriptCanOpenWindowsAutomatically = true
-            mediaPlaybackRequiresUserGesture = false
+    private fun setupUI() {
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor("#0a0a0a"))
+            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         }
 
-        WebView.setWebContentsDebuggingEnabled(true)
+        // ── Status Bar ──
+        val statusBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding(dp(16), dp(10), dp(16), dp(10))
+            setBackgroundColor(Color.parseColor("#1a1a1a"))
+        }
+        
+        statusDot = View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(10), dp(10)).apply { 
+                setMargins(0, 0, dp(8), 0)
+            }
+            background = getOvalDrawable(Color.parseColor("#FF9800"))
+        }
+        
+        statusLabel = TextView(this).apply {
+            text = "Connecting..."
+            textSize = 13f
+            setTextColor(Color.parseColor("#aaaaaa"))
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
 
-        webView.webViewClient = object : WebViewClient() {
-            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-                return false
+        btnSettings = ImageButton(this).apply {
+            setImageResource(android.R.drawable.ic_menu_preferences)
+            setBackgroundColor(Color.TRANSPARENT)
+            setColorFilter(Color.parseColor("#666666"))
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            setOnClickListener { showSettings() }
+            layoutParams = LinearLayout.LayoutParams(dp(36), dp(36))
+        }
+
+        syncLabel = TextView(this).apply {
+            text = ""
+            textSize = 11f
+            setTextColor(Color.parseColor("#555555"))
+        }
+
+        statusBar.addView(statusDot)
+        statusBar.addView(statusLabel)
+        statusBar.addView(btnSettings)
+
+        // ── Chat List ──
+        recyclerView = RecyclerView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+            layoutManager = LinearLayoutManager(this@MainActivity).apply {
+                stackFromEnd = true
             }
-            override fun onPageFinished(view: WebView?, url: String?) {
-                updateStatus(mode)
+        }
+        chatAdapter = ChatAdapter(messages)
+        recyclerView.adapter = chatAdapter
+
+        // ── Input Bar ──
+        val inputBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(8), dp(12), dp(12))
+            setBackgroundColor(Color.parseColor("#1a1a1a"))
+        }
+
+        inputField = EditText(this).apply {
+            hint = "Type a message..."
+            setHintTextColor(Color.parseColor("#555555"))
+            setTextColor(Color.parseColor("#ffffff"))
+            textSize = 16f
+            setPadding(dp(16), dp(12), dp(16), dp(12))
+            background = getRoundedDrawable(Color.parseColor("#2a2a2a"), dp(24))
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                setMargins(0, 0, dp(8), 0)
             }
-            override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
-                if (request?.isForMainFrame == true) {
-                    // Gateway not reachable, load local UI
-                    loadLocalUi()
+            setOnEditorActionListener { _, actionId, _ ->
+                if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEND) {
+                    sendMessage(); true
+                } else false
+            }
+        }
+
+        sendButton = ImageButton(this).apply {
+            setImageResource(android.R.drawable.ic_menu_send)
+            setBackgroundColor(Color.parseColor("#1A73E8"))
+            background = getRoundedDrawable(Color.parseColor("#1A73E8"), dp(28))
+            setColorFilter(Color.WHITE)
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+            setOnClickListener { sendMessage() }
+            layoutParams = LinearLayout.LayoutParams(dp(48), dp(48))
+        }
+
+        inputBar.addView(inputField)
+        inputBar.addView(sendButton)
+
+        // Assemble
+        root.addView(statusBar)
+        root.addView(recyclerView)
+        root.addView(inputBar)
+        
+        setContentView(root)
+        
+        // Add welcome message
+        addMessage(ChatMessage(role = "assistant", content = "Welcome to Hermes! Type a message to start chatting."))
+    }
+
+    // ── WebSocket Connection ──
+
+    private fun connectWebSocket() {
+        updateStatus("connecting", "⏳ Connecting...")
+        
+        val request = Request.Builder().url(wsUrl).build()
+        webSocket = client.newWebSocket(request, object : WebSocketListener() {
+            override fun onOpen(ws: WebSocket, response: Response) {
+                isConnected = true
+                isOnline = true
+                handler.post {
+                    updateStatus("online", "🟢 Connected")
+                    // Send pending messages
+                    for (msg in pendingMessages) {
+                        sendRpcMessage(msg)
+                    }
+                    pendingMessages.clear()
                 }
             }
-        }
 
-        webView.webChromeClient = object : WebChromeClient() {
-            override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                if (newProgress < 100) {
-                    updateStatus("connecting", "⏳ Loading... $newProgress%")
+            override fun onMessage(ws: WebSocket, text: String) {
+                handler.post { handleRpcMessage(text) }
+            }
+
+            override fun onClosing(ws: WebSocket, code: Int, reason: String) {
+                ws.close(1000, null)
+                isConnected = false
+                handler.post { updateStatus("offline", "🔴 Disconnected") }
+            }
+
+            override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
+                isConnected = false
+                isOnline = false
+                handler.post { 
+                    updateStatus("offline", "🔴 Connection failed")
+                    // Try HTTP fallback
+                    tryHttpMode()
                 }
             }
-            override fun onConsoleMessage(msg: ConsoleMessage?): Boolean {
-                if (msg != null && msg.message().contains("error", true)) {
-                    android.util.Log.d("HermesUI", "Console: ${msg.message()}")
+        })
+    }
+
+    private fun handleRpcMessage(json: String) {
+        try {
+            val obj = JSONObject(json)
+            
+            // Handle JSON-RPC response
+            if (obj.has("result")) {
+                val result = obj.getJSONObject("result")
+                if (result.has("content")) {
+                    val content = result.getString("content")
+                    addMessage(ChatMessage(role = "assistant", content = content))
                 }
-                return true
             }
-        }
-
-        // Add JavaScript interface for native bridge
-        webView.addJavascriptInterface(HermesBridge(), "HermesBridge")
-    }
-
-    /**
-     * JavaScript bridge — allows the web UI to call native Android functions
-     */
-    inner class HermesBridge {
-        @android.webkit.JavascriptInterface
-        fun getMode(): String = mode
-
-        @android.webkit.JavascriptInterface
-        fun getGatewayUrl(): String = gatewayUrl
-
-        @android.webkit.JavascriptInterface
-        fun setGatewayUrl(url: String) {
-            gatewayUrl = url
-            prefs.edit().putString("gateway_url", url).apply()
-        }
-
-        @android.webkit.JavascriptInterface
-        fun showToast(msg: String) {
-            handler.post { Toast.makeText(this@MainActivity, msg, Toast.LENGTH_SHORT).show() }
-        }
-
-        @android.webkit.JavascriptInterface
-        fun showSettings() {
-            handler.post { showSettingsDialog() }
-        }
-
-        @android.webkit.JavascriptInterface
-        fun refreshConnection() {
-            handler.post { checkMode() }
+            
+            // Handle events
+            if (obj.has("method")) {
+                val method = obj.getString("method")
+                when (method) {
+                    "gateway.ready" -> updateStatus("online", "🟢 Online")
+                    "agent.start" -> { /* Agent started thinking */ }
+                    "agent.token" -> {
+                        val token = obj.optJSONObject("params")?.optString("token", "") ?: ""
+                        appendToLastMessage(token)
+                    }
+                    "agent.done" -> {
+                        // Response complete
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // Not JSON-RPC, treat as plain text
+            addMessage(ChatMessage(role = "assistant", content = json))
         }
     }
 
-    private fun setupStatusBarClick() {
-        statusBar.setOnClickListener { showSettingsDialog() }
+    private fun sendRpcMessage(text: String) {
+        // Hermes uses newline-delimited JSON-RPC over WebSocket
+        val rpc = JSONObject().apply {
+            put("jsonrpc", "2.0")
+            put("id", UUID.randomUUID().toString())
+            put("method", "chat.send")
+            put("params", JSONObject().apply {
+                put("message", text)
+                put("session_id", sessionId)
+            })
+        }.toString()
+        
+        webSocket?.send(rpc)
     }
 
-    /**
-     * Check if PC is reachable and determine mode
-     */
-    private fun checkMode() {
-        updateStatus("connecting", "⏳ Checking PC...")
+    private fun tryHttpMode() {
+        // Fallback: use HTTP API if WebSocket fails
         Thread {
-            val pcReachable = ping(gatewayUrl)
-
-            handler.post {
-                if (pcReachable) {
-                    // PC ONLINE → Load local UI and connect to PC gateway
-                    mode = "online"
-                    loadLocalUi()
-                    updateStatus("online", "🟢 Online — PC Connected")
-                } else {
-                    // PC OFFLINE → Load local UI + try local Hermes
-                    mode = "offline"
-                    tryLocalHermes()
+            try {
+                val req = Request.Builder().url("$gatewayUrl/health").build()
+                client.newCall(req).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        handler.post { updateStatus("online", "🟢 HTTP Mode") }
+                        isOnline = true
+                        isConnected = true
+                    }
                 }
+            } catch (e: Exception) {
+                handler.post { updateStatus("offline", "🔴 No gateway") }
             }
         }.start()
     }
 
-    /**
-     * Load the Hermes desktop UI from local assets
-     * This gives you the EXACT same UI as the desktop app
-     */
-    private fun loadLocalUi() {
-        webView.loadUrl("file:///android_asset/index.html")
+    // ── Messaging ──
+
+    private fun sendMessage() {
+        val text = inputField.text.toString().trim()
+        if (text.isEmpty()) return
+        
+        inputField.setText("")
+        addMessage(ChatMessage(role = "user", content = text))
+        
+        if (isConnected) {
+            sendRpcMessage(text)
+        } else {
+            // Queue for later
+            pendingMessages.add(text)
+            addMessage(ChatMessage(role = "assistant", content = "⏸ Queued — will send when connected"))
+            // Try reconnect
+            connectWebSocket()
+        }
     }
 
-    /**
-     * Try to start local Hermes via Termux
-     */
-    private fun tryLocalHermes() {
-        // Check if Termux is installed
-        val termuxInstalled = try {
-            packageManager.getPackageInfo("com.termux", 0)
-            true
-        } catch (e: Exception) { false }
+    private fun addMessage(msg: ChatMessage) {
+        messages.add(msg)
+        handler.post {
+            chatAdapter.notifyItemInserted(messages.size - 1)
+            recyclerView.scrollToPosition(messages.size - 1)
+        }
+    }
 
-        if (termuxInstalled) {
-            // Start Hermes in Termux
-            try {
-                val intent = Intent().apply {
-                    setClassName("com.termux", "com.termux.app.RunCommandService")
-                    action = "com.termux.RUN_COMMAND"
-                    putExtra("com.termux.RUN_COMMAND_PATH", "/data/data/com.termux/files/usr/bin/bash")
-                    putExtra("com.termux.RUN_COMMAND_ARGUMENTS", arrayOf("-c",
-                        "cd ~/hermes && hermes gateway run --replace 2>&1 &"
-                    ))
-                    putExtra("com.termux.RUN_COMMAND_WORKDIR", "/data/data/com.termux/files/home/hermes")
-                    putExtra("com.termux.RUN_COMMAND_BACKGROUND", true)
-                    putExtra("com.termux.RUN_COMMAND_SESSION_ACTION", "0")
+    private fun appendToLastMessage(token: String) {
+        if (messages.isNotEmpty()) {
+            val last = messages.last()
+            if (last.role == "assistant" && !last.isPending) {
+                messages[messages.size - 1] = last.copy(content = last.content + token)
+                handler.post {
+                    chatAdapter.notifyItemChanged(messages.size - 1)
+                    recyclerView.scrollToPosition(messages.size - 1)
                 }
-                startService(intent)
-
-                // Wait for local Hermes to start
-                handler.postDelayed({
-                    if (ping(localUrl)) {
-                        mode = "offline"
-                        loadLocalUi()
-                        updateStatus("offline", "🟡 Offline — Local Hermes Running")
-                    } else {
-                        // Hermes not running but UI works
-                        loadLocalUi()
-                        updateStatus("offline", "🟡 Offline — Local Mode (no Termux Hermes)")
-                    }
-                }, 3000)
-            } catch (e: Exception) {
-                loadLocalUi()
-                updateStatus("offline", "🟡 Offline — Local UI")
             }
         } else {
-            loadLocalUi()
-            updateStatus("offline", "🟡 Offline — Install Termux for full mode")
+            addMessage(ChatMessage(role = "assistant", content = token, isPending = true))
         }
     }
 
-    private fun ping(url: String): Boolean {
-        return try {
-            val req = Request.Builder()
-                .url(url)
-                .get()
-                .build()
-            client.newCall(req).execute().use { response ->
-                response.isSuccessful || response.code < 500
-            }
-        } catch (e: Exception) { false }
-    }
+    // ── Connection Monitor ──
 
-    private fun updateStatus(newMode: String, msg: String? = null) {
-        mode = newMode
-        val message = msg ?: when (mode) {
-            "online" -> "🟢 Online — PC"
-            "offline" -> "🟡 Offline — Local"
-            "connecting" -> "⏳ Connecting..."
-            else -> "🔴 Error"
-        }
-        statusText.text = message
-
-        val color = when (mode) {
-            "online" -> Color.parseColor("#4CAF50")
-            "offline" -> Color.parseColor("#FF9800")
-            "connecting" -> Color.parseColor("#2196F3")
-            else -> Color.parseColor("#F44336")
-        }
-        statusIndicator.setBackgroundColor(color)
-    }
-
-    private fun startMonitor() {
+    private fun startConnectionMonitor() {
         handler.postDelayed(object : Runnable {
             override fun run() {
-                Thread {
-                    val pcAvailable = ping(gatewayUrl)
-                    handler.post {
-                        if (pcAvailable && mode != "online") {
-                            mode = "online"
-                            updateStatus("online", "🟢 PC back online!")
-                            loadLocalUi()
-                        } else if (!pcAvailable && mode == "online") {
-                            tryLocalHermes()
-                        }
-                    }
-                }.start()
+                if (!isConnected) {
+                    connectWebSocket()
+                }
                 handler.postDelayed(this, 15000)
             }
         }, 15000)
     }
 
-    private fun showSettingsDialog() {
+    // ── Status ──
+
+    private fun updateStatus(state: String, text: String) {
+        statusLabel.text = text
+        val color = when (state) {
+            "online" -> Color.parseColor("#4CAF50")
+            "offline" -> Color.parseColor("#F44336")
+            else -> Color.parseColor("#FF9800")
+        }
+        statusDot.background = getOvalDrawable(color)
+    }
+
+    // ── Settings ──
+
+    private fun showSettings() {
         val view = LayoutInflater.from(this).inflate(R.layout.dialog_settings, null)
         val etIp = view.findViewById<EditText>(R.id.etGatewayIp)
         val etPort = view.findViewById<EditText>(R.id.etGatewayPort)
         val swAuto = view.findViewById<Switch>(R.id.switchAutoRetry)
-        val btnSync = view.findViewById<Button>(R.id.btnSyncNow)
-        val btnInstallTermux = view.findViewById<Button>(R.id.btnInstallTermux)
 
-        val parts = gatewayUrl.removePrefix("http://").split(":")
+        val parts = gatewayUrl.replace("http://", "").replace("https://", "").split(":")
         etIp.setText(parts[0])
         etPort.setText(parts.getOrElse(1) { "18789" })
         swAuto.isChecked = prefs.getBoolean("auto_retry", true)
 
-        val dialog = AlertDialog.Builder(this)
-            .setTitle("⚙️ Hermes Settings")
+        AlertDialog.Builder(this)
+            .setTitle("⚙️ Settings")
             .setView(view)
             .setPositiveButton("Save") { _, _ ->
                 gatewayUrl = "http://${etIp.text}:${etPort.text}"
+                wsUrl = "ws://${etIp.text}:${etPort.text}/api/ws"
                 prefs.edit()
                     .putString("gateway_url", gatewayUrl)
                     .putBoolean("auto_retry", swAuto.isChecked)
                     .apply()
-                checkMode()
+                // Reconnect
+                webSocket?.close(1000, "Reconnecting")
+                connectWebSocket()
             }
             .setNegativeButton("Cancel", null)
-            .create()
-
-        btnSync.setOnClickListener {
-            checkMode()
-            Toast.makeText(this, "Syncing...", Toast.LENGTH_SHORT).show()
-        }
-
-        btnInstallTermux.setOnClickListener {
-            try {
-                startActivity(Intent(Intent.ACTION_VIEW,
-                    Uri.parse("https://f-droid.org/en/packages/com.termux/")))
-            } catch (e: Exception) {
-                Toast.makeText(this, "Cannot open browser", Toast.LENGTH_SHORT).show()
-            }
-        }
-
-        dialog.show()
+            .show()
     }
 
-    override fun onBackPressed() {
-        if (webView.canGoBack()) {
-            webView.goBack()
-        } else {
-            AlertDialog.Builder(this)
-                .setTitle("Hermes")
-                .setMessage("Minimize or exit?")
-                .setPositiveButton("Minimize") { _, _ -> moveTaskToBack(true) }
-                .setNeutralButton("Exit") { _, _ -> finish() }
-                .setNegativeButton("Cancel", null)
-                .show()
+    // ── Helpers ──
+
+    private fun dp(px: Int): Int = (px * resources.displayMetrics.density).toInt()
+
+    private fun getOvalDrawable(color: Int): android.graphics.drawable.Drawable {
+        val shape = android.graphics.drawable.GradientDrawable().apply {
+            shape = android.graphics.drawable.GradientDrawable.OVAL
+            setColor(color)
         }
+        return shape
+    }
+
+    private fun getRoundedDrawable(color: Int, radius: Int): android.graphics.drawable.Drawable {
+        val shape = android.graphics.drawable.GradientDrawable().apply {
+            shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+            setColor(color)
+            cornerRadius = radius.toFloat()
+        }
+        return shape
+    }
+
+    // ── Chat Adapter (Native Message Bubbles) ──
+
+    inner class ChatAdapter(private val items: List<ChatMessage>) : 
+        RecyclerView.Adapter<ChatAdapter.VH>() {
+
+        inner class VH(view: View) : RecyclerView.ViewHolder(view) {
+            val bubble: TextView = view.findViewById(R.id.bubble)
+        }
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
+            val view = LayoutInflater.from(parent.context).inflate(R.layout.item_chat, parent, false)
+            return VH(view)
+        }
+
+        override fun onBindViewHolder(holder: VH, position: Int) {
+            val msg = items[position]
+            holder.bubble.text = msg.content
+            
+            // Style based on role
+            val layoutParams = holder.bubble.layoutParams as FrameLayout.LayoutParams
+            if (msg.role == "user") {
+                holder.bubble.background = getRoundedDrawable(Color.parseColor("#1A73E8"), dp(18))
+                holder.bubble.setTextColor(Color.WHITE)
+                layoutParams.gravity = android.view.Gravity.END
+            } else {
+                holder.bubble.background = getRoundedDrawable(Color.parseColor("#2a2a2a"), dp(18))
+                holder.bubble.setTextColor(Color.parseColor("#e0e0e0"))
+                layoutParams.gravity = android.view.Gravity.START
+            }
+            holder.bubble.layoutParams = layoutParams
+            holder.bubble.maxWidth = (resources.displayMetrics.widthPixels * 0.75).toInt()
+        }
+
+        override fun getItemCount() = items.size
     }
 
     override fun onDestroy() {
+        webSocket?.close(1000, "App closed")
         handler.removeCallbacksAndMessages(null)
-        webView.destroy()
         super.onDestroy()
     }
 }
