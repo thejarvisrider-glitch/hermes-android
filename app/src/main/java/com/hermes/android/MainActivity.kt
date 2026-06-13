@@ -303,7 +303,7 @@ class MainActivity : AppCompatActivity() {
         override fun onBindViewHolder(h: VH, pos: Int) {
             val m = items[pos]; h.bubble.text = m.content
             h.time.text = android.text.format.DateFormat.format("HH:mm", m.time).toString()
-            val lp = h.bubble.layoutParams as FrameLayout.LayoutParams
+            val lp = h.bubble.layoutParams as LinearLayout.LayoutParams
             if (m.role == "user") {
                 h.bubble.background = rounded(C_ACCENT, dp(18)); h.bubble.setTextColor(Color.WHITE)
                 lp.gravity = Gravity.END; h.time.gravity = Gravity.END; h.time.setTextColor(C_HINT)
