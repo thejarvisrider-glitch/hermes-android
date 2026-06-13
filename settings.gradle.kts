@@ -1,6 +1,3 @@
-import org.gradle.kotlin.dsl.kotlin
-import org.gradle.plugin.use.PluginDependenciesSpec
-
 pluginManagement {
     repositories {
         google()
